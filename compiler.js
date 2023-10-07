@@ -161,7 +161,7 @@ async function compile(rawCode, boardName, config, cb) {
   build.usb_product = `-D"USB_PRODUCT=\\"Pico\\""`;
   build.ram_length = "256k";
   build.flash_total = "";
-  build.variant = "";
+  build.variant = GB.board.board_info.name;
   build.debug_port = "";
   build.debug_level = "";
   build.picodebugflags = "-DENABLE_PICOTOOL_USB";
@@ -272,7 +272,7 @@ async function compile(rawCode, boardName, config, cb) {
   includes_dir.push(`${platformDirectory}/sdk/cores/rp2040`); // platform sdk
   includes_dir.push(`${platformDirectory}/include`); // platform include dir
   includes_dir.push(`${boardDirectory}/include`); // board include dir
-  includes_dir = includes_dir.concat(plugins_includes_dir); // plugin
+  includes_dir = includes_dir.concat(codeContext.plugins_includes_switch); // plugin
 
   // Gen sources dir
   let sources_cores_dir = [];
@@ -330,7 +330,7 @@ async function compile(rawCode, boardName, config, cb) {
     const file_name = getFileName(object_file);
 
     let cmd = recipe.ar_pattern;
-    cmd = cmd.replace("{archive_file}", archive_file); // TODO: archive split name
+    cmd = cmd.replace("{archive_file}", archive_file);
     cmd = cmd.replace("{object_file}", object_file);
     cmd = ospath(cmd).replace(/\s\s+/g, ' ');
 
@@ -349,7 +349,7 @@ async function compile(rawCode, boardName, config, cb) {
     return archive_file;
   };
 
-  // build core file
+  // Build core file & Archives
   const archive_core_file = `${build_dir}/core.a`;
   if (!fs.existsSync(archive_core_file)) {
     // Find cores file
@@ -366,19 +366,33 @@ async function compile(rawCode, boardName, config, cb) {
       await archiveFile(object_file, archive_core_file);
     }
   }
+
+  // Build plugin
+  const plugin_object_files = [];
+  for (const source_file of codeContext.plugins_sources) {
+    const source_dir = path.dirname(source_file);
+    plugin_object_files.push(await buildSourceFile(source_dir, source_file));
+  }
   
-  // build sketch.cpp
+  // Build sketch.cpp
   await buildSourceFile(build_dir, sketch_path);
 
   // Link object
   const elf_file = `${build_dir}/firmware.elf`;
   {
     const file_name = getFileName(elf_file);
+
     log(`>>> Linking... ${elf_file}`);
     cb(`linking... ${file_name}`);
+
+    const object_files = [
+      `${sketch_path}.o`,  // sketch file
+      ...plugin_object_files // plugin
+    ].map(f => `"${path.normalize(f)}"`).join(" ");
+
     for (const recipe_pattern of [ recipe.linking_prelink1_pattern, recipe.linking_prelink2_pattern, recipe.c_combine_pattern ]) {
       cmd = recipe_pattern;
-      cmd = cmd.replace("{object_files}", `"${sketch_path}.o"`);
+      cmd = cmd.replace("{object_files}", object_files);
       cmd = cmd.replace("{archive_file}", archive_core_file);
       cmd = cmd.replace("{elf_file}", elf_file);
       cmd = ospath(cmd).replace(/\s\s+/g, ' ');
@@ -396,8 +410,10 @@ async function compile(rawCode, boardName, config, cb) {
   const uf2_file = `${build_dir}/firmware.uf2`;
   {
     const file_name = getFileName(elf_file);
+
     log(`>>> Create .uf2 file ... ${uf2_file}`);
     cb(`create ${file_name} file ...`);
+
     let cmd = recipe.objcopy_uf2_pattern;
     cmd = cmd.replace("{elf_file}", elf_file);
     cmd = cmd.replace("{uf2_file}", uf2_file);

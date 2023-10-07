@@ -9,8 +9,8 @@ const GB = Vue.prototype.$global;
 const mkdirp = engine.util.requireFunc("mkdirp");
 
 //---- setup dir and config ----//
-let platformName = "arduino-pico";
-let platformDirectory = `${engine.util.platformDir}/${platformName}`;
+const platformName = "arduino-pico";
+const platformDirectory = `${engine.util.platformDir}/${platformName}`;
 
 const platform_path = platformDirectory + "/sdk";
 const python3_path = platformDirectory + "/tools/pqt-python3/1.0.1-base-3a57aed/python3";
@@ -41,10 +41,14 @@ async function compile(rawCode, boardName, config, cb) {
   const boardContext = JSON.parse(fs.readFileSync(boardDirectory + "/context.json", "utf8"));
 
   const build_dir = `${boardDirectory}/build`;
-  if (fs.existsSync(build_dir)) { // Clear build folder
-    engine.util.rmdirf(build_dir);
+  if (!GB.not_first_compile) {
+    if (fs.existsSync(build_dir)) { // Clear build folder
+      engine.util.rmdirf(build_dir);
+    }
+    mkdirp.sync(build_dir);
+
+    GB.not_first_compile = true;
   }
-  mkdirp.sync(build_dir);
 
   let sourceCode = ""
   let codeContext = {};
@@ -91,7 +95,8 @@ async function compile(rawCode, boardName, config, cb) {
     }
   }
 
-  fs.writeFileSync(`${build_dir}/sketch.cpp`, sourceCode, "utf8");
+  const sketch_path = `${build_dir}/sketch.cpp`;
+  fs.writeFileSync(sketch_path, sourceCode, "utf8");
 
   log('>>> Compile Files ...');
 
@@ -270,66 +275,61 @@ async function compile(rawCode, boardName, config, cb) {
   includes_dir = includes_dir.concat(plugins_includes_dir); // plugin
 
   // Gen sources dir
-  let sources_dir = [];
-  sources_dir.push(`${platformDirectory}/sdk/cores/rp2040`); // platform sdk
-  sources_dir.push(`${platformDirectory}/include`); // platform include dir
-  sources_dir.push(`${boardDirectory}/include`); // board include dir
-  sources_dir = includes_dir.concat(plugins_includes_dir); // plugin
-  sources_dir.push(build_dir); // build dir of sketch.cpp
+  let sources_cores_dir = [];
+  sources_cores_dir.push(`${platformDirectory}/sdk/cores/rp2040`); // platform sdk
+  sources_cores_dir.push(`${platformDirectory}/include`); // platform include dir
+  sources_cores_dir.push(`${boardDirectory}/include`); // board include dir
+  // sources_dir = includes_dir.concat(plugins_includes_dir); // plugin
 
   // Build .c, .cpp, .s, .S file
-  for (const source_dir of sources_dir) {
-    const source_files = engine.util.walk(source_dir).filter(f => f.endsWith(".cpp") || f.endsWith(".c") || f.endsWith(".s") || f.endsWith(".S")); // find .c, .cpp, .s, .S
-    for (const source_file of source_files) {
-      log("Compiling => " + source_file);
+  const buildSourceFile = async (source_dir, source_file) => {
+    log("Compiling => " + source_file);
 
-      const file_name = getFileName(source_file);
-      const object_file = source_file.replace(source_dir, build_dir) + ".o";
+    const file_name = getFileName(source_file);
+    const object_file = source_file.replace(source_dir, build_dir) + ".o";
 
-      let cmd = "";
-      if (source_file.endsWith(".c")) {
-        cmd = recipe.c_o_pattern
-      } else if (source_file.endsWith(".cpp")) {
-        cmd = recipe.cpp_o_pattern;
-      } else if (source_file.endsWith(".s") || source_file.endsWith(".S")) {
-        cmd = recipe.S_o_pattern;
-      }
-      cmd = cmd.replace("{includes}", includes_dir.map(dir => `-I"${dir}"`).join(" "));
-      cmd = cmd.replace("{source_file}", source_file);
-      cmd = cmd.replace("{object_file}", object_file);
-      cmd = ospath(cmd).replace(/\s\s+/g, ' ');
+    let cmd = "";
+    if (source_file.endsWith(".c")) {
+      cmd = recipe.c_o_pattern
+    } else if (source_file.endsWith(".cpp")) {
+      cmd = recipe.cpp_o_pattern;
+    } else if (source_file.endsWith(".s") || source_file.endsWith(".S")) {
+      cmd = recipe.S_o_pattern;
+    }
+    cmd = cmd.replace("{includes}", includes_dir.map(dir => `-I"${dir}"`).join(" "));
+    cmd = cmd.replace("{source_file}", source_file);
+    cmd = cmd.replace("{object_file}", object_file);
+    cmd = ospath(cmd).replace(/\s\s+/g, ' ');
 
-      // make dir if needs
-      if (path.dirname(source_file.replace(source_dir, "")) != ".") {
-        const dir = `${build_dir}/${path.dirname(source_file.replace(source_dir, ""))}`;
-        if (!fs.existsSync(dir)) {
-          fs.mkdirSync(dir);
-        }
-      }
-
-      const { stderr, stdout } = await execPromise(cmd, { cwd: boardDirectory });
-      if (!stderr) {
-        log(`Compiled ... ${source_file} OK.`);
-        cb(`compiling... ${file_name} ok.`);
-      } else {
-        log(`Compiled... ${source_file} OK. (with warnings)`);
-        cb({
-          file: file_name,
-          error: stderr
-        });
+    // make dir if needs
+    if (path.dirname(source_file.replace(source_dir, "")) != ".") {
+      const dir = `${build_dir}/${path.dirname(source_file.replace(source_dir, ""))}`;
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir);
       }
     }
-  }
 
-  // Archives .o to core.a
-  const archive_file = `${build_dir}/core.a`;
-  for (const object_file of engine.util.walk(build_dir).filter(f => f.endsWith(".o"))) {
+    const { stderr } = await execPromise(cmd, { cwd: boardDirectory });
+    if (!stderr) {
+      log(`Compiled ... ${source_file} OK.`);
+      cb(`compiling... ${file_name} ok.`);
+    } else {
+      log(`Compiled... ${source_file} OK. (with warnings)`);
+      cb({
+        file: file_name,
+        error: stderr
+      });
+    }
+
+    return object_file;
+  };
+
+  const archiveFile = async (object_file, archive_file) => {
+    log("Archives => " + object_file);
+
     const file_name = getFileName(object_file);
-    if (file_name.startsWith("sketch.cpp")) { // skip sketch.cpp because it often update
-      continue;
-    }
 
-    cmd = recipe.ar_pattern;
+    let cmd = recipe.ar_pattern;
     cmd = cmd.replace("{archive_file}", archive_file); // TODO: archive split name
     cmd = cmd.replace("{object_file}", object_file);
     cmd = ospath(cmd).replace(/\s\s+/g, ' ');
@@ -345,7 +345,30 @@ async function compile(rawCode, boardName, config, cb) {
         error: null
       });
     }
+
+    return archive_file;
+  };
+
+  // build core file
+  const archive_core_file = `${build_dir}/core.a`;
+  if (!fs.existsSync(archive_core_file)) {
+    // Find cores file
+    const cores_object_files = [];
+    for (const source_dir of sources_cores_dir) {
+      const source_files = engine.util.walk(source_dir).filter(f => f.endsWith(".cpp") || f.endsWith(".c") || f.endsWith(".s") || f.endsWith(".S")); // find .c, .cpp, .s, .S
+      for (const source_file of source_files) {
+        cores_object_files.push(await buildSourceFile(source_dir, source_file));
+      }
+    }
+
+    // caching cores file via archives .o to core.a
+    for (const object_file of cores_object_files) {
+      await archiveFile(object_file, archive_core_file);
+    }
   }
+  
+  // build sketch.cpp
+  await buildSourceFile(build_dir, sketch_path);
 
   // Link object
   const elf_file = `${build_dir}/firmware.elf`;
@@ -355,9 +378,9 @@ async function compile(rawCode, boardName, config, cb) {
     cb(`linking... ${file_name}`);
     for (const recipe_pattern of [ recipe.linking_prelink1_pattern, recipe.linking_prelink2_pattern, recipe.c_combine_pattern ]) {
       cmd = recipe_pattern;
-      cmd = cmd.replace("{object_files}", `${build_dir}/sketch.cpp.o`);
+      cmd = cmd.replace("{object_files}", `"${sketch_path}.o"`);
+      cmd = cmd.replace("{archive_file}", archive_core_file);
       cmd = cmd.replace("{elf_file}", elf_file);
-      cmd = cmd.replace("{archive_file}", archive_file);
       cmd = ospath(cmd).replace(/\s\s+/g, ' ');
 
       const { stderr } = await execPromise(cmd, { cwd: boardDirectory });

@@ -1,0 +1,15 @@
+{
+  "toolchain_dir": "./tools",
+  "cflags": [
+
+  ],
+  "cppflags" : [
+    
+  ],
+  "ldflags": [
+    
+  ],
+  "ldlibflag": [
+  ],
+  "ARDUINO_VERSION" : 189
+}
